@@ -6,7 +6,31 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-//#pragma pack[1]
+/*------------------------------------------------------------------*/
+
+static int mask_laplacian3[9]= {
+    0,-1,0,
+    -1,4,-1,
+    0,-1,0
+};
+
+static int mask_laplacian5[25] = {
+    0,0,-1,0,0,
+    0,-1,-2,-1,0,
+    -1,-2,16,-2,-1,
+    0,-1,-2,-1,0,
+    0,0,-1,0,0
+};
+
+static int mask_laplacian7[49] = {
+    0,0,0,-1,0,0,0,
+    0,0,-1,-2,-1,0,0,
+    0,-1,-2,-3,-2,-1,0,
+    -1,-2,-3,48,-3,-2,-1,
+    0,-1,-2,-3,-2,-1,0,
+    0,0,-1,-2,-1,0,0,
+    0,0,0,-1,0,0,0
+};
 
 /*------------------------------------------------------------------*/
 typedef struct {
@@ -51,6 +75,7 @@ PIXEL *le_imagem_bmp(const char *arquivo, int *largura, int *altura, int *max_va
 
 
 /*------------------------------------------------------------------*/
+
 void ordena_filtro(int *media, int cont){
 	int i, j, aux;
 
@@ -64,7 +89,9 @@ void ordena_filtro(int *media, int cont){
 		}
 	}
 }
+
 /*------------------------------------------------------------------*/
+
 void * filtro_mediana(int linha, PIXEL* out, int altura, int largura, int mask, int np, PIXEL *img){
 	
 	int i, j, k, l;	
@@ -105,8 +132,63 @@ void * filtro_mediana(int linha, PIXEL* out, int altura, int largura, int mask, 
 	free(mediaG);
 	free(mediaB);
 }
+
 /*------------------------------------------------------*/
 
+int* escolherMatrizLaplaciana(int mask){
+	switch (mask) {
+        case 3:
+            return mask_laplacian3;
+        case 5:
+            return mask_laplacian5;
+        case 7:
+            return mask_laplacian7;
+        default:
+            return NULL;
+    }
+}
+
+/*------------------------------------------------------------------*/
+
+void *filtro_laplaciano(int linha, PIXEL* out, int altura, int largura, int mask, int np, PIXEL *img){
+	
+	int i, j, k, l;	
+	
+	int laplaceR, laplaceG, laplaceB;
+	
+	int *laplacian_mask = NULL;
+	laplacian_mask =  escolherMatrizLaplaciana(mask);
+		
+	for (i=linha; i<altura; i+=np){
+		for (j=0; j<largura; j++){			
+			laplaceR = 0, laplaceG = 0, laplaceB = 0;			
+
+			for(k=-mask/2; k<=mask/2; k++){
+				for(l=-mask/2; l<=mask/2; l++){
+					if (i+k>=0 && i+k<altura && j+l>=0 && j+l<largura){
+						
+						int laplace_value = laplacian_mask[(k+mask/2) * mask + (l+mask/2)];
+						
+						laplaceR += img[(i+k)*largura+(j+l)].r * laplace_value;
+						laplaceG += img[(i+k)*largura+(j+l)].g * laplace_value;
+						laplaceB += img[(i+k)*largura+(j+l)].b * laplace_value;
+					}
+				}
+			}
+			
+			laplaceR = laplaceR < 0 ? 0 : (laplaceR > 255 ? 255 : laplaceR);
+            laplaceG = laplaceG < 0 ? 0 : (laplaceG > 255 ? 255 : laplaceG);
+            laplaceB = laplaceB < 0 ? 0 : (laplaceB > 255 ? 255 : laplaceB);
+
+			out[i*largura+j].r = laplaceR;
+			out[i*largura+j].g = laplaceG;
+			out[i*largura+j].b = laplaceB;
+			
+		}
+	}
+}
+
+/*------------------------------------------------------*/
 void * escala_cinza(int linha, PIXEL* out, int altura, int largura, int np, PIXEL *img){	
 	int i, j, k, l;
 	
@@ -139,20 +221,20 @@ void escreve_imagem_bmp(const char *arquivo, PIXEL *img, int largura, int altura
         0, 0, 0, 0,         // Tamanho do arquivo
         0, 0, 0, 0,         // Reservado
         54, 0, 0, 0,        // Offset para dados de imagem
-        40, 0, 0, 0,        // Tamanho do cabeçalho DIB
+        40, 0, 0, 0,        // Tamanho do cabecalho DIB
         0, 0, 0, 0,         // Largura
         0, 0, 0, 0,         // Altura
         1, 0,               // Planos
         24, 0,              // Bits por pixel (24 = RGB)
         0, 0, 0, 0,         // Compressão (0 = sem)
         0, 0, 0, 0,         // Tamanho da imagem
-        0, 0, 0, 0,         // Resolução X
-        0, 0, 0, 0,         // Resolução Y
+        0, 0, 0, 0,         // Resolucao X
+        0, 0, 0, 0,         // Resolucao Y
         0, 0, 0, 0,         // Cores na paleta
         0, 0, 0, 0          // Cores importantes
     };
 
-    // Preencher campos dinâmicos
+    // Preencher campos dinamicos
     *(int*)&header[2] = size;
     *(int*)&header[18] = largura;
     *(int*)&header[22] = altura;
@@ -177,7 +259,7 @@ void escreve_imagem_bmp(const char *arquivo, PIXEL *img, int largura, int altura
 int main(int argc, char **argv){
 
 	char entrada[50], saida[50];
-	int largura, altura, max_valor, mask, i, np, shmid_out, shmid_gray, pid, id_seq, npr;
+	int largura, altura, max_valor, mask, i, np, shmid_out, shmid_median, shmid_gray, pid, id_seq, npr;
 	key_t chave = 17;
 
 	if ( argc != 5 ){
@@ -190,12 +272,20 @@ int main(int argc, char **argv){
 	mask = atoi(argv[3]);
 	npr = atoi(argv[4]);	
 	
+	if ( mask != 3 && mask != 5 && mask != 7 ){
+		printf("mask deve ser 3, 5 ou 7\n");
+		exit(0);
+	}		
+	
 	PIXEL *img = le_imagem_bmp(entrada, &largura, &altura, &max_valor);
 
 	shmid_gray = shmget(chave, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
 	PIXEL *gray_out = (PIXEL *)shmat(shmid_gray, 0, 0);
 	
-	shmid_out = shmget(chave + 1, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
+	shmid_median = shmget(chave + 1, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
+	PIXEL *out_median = (PIXEL *)shmat(shmid_median, 0, 0);
+	
+	shmid_out = shmget(chave + 2, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
 	PIXEL *out = (PIXEL *)shmat(shmid_out, 0, 0);
 		
 	id_seq = 0;
@@ -208,8 +298,8 @@ int main(int argc, char **argv){
 	}
 	
 	escala_cinza(id_seq, gray_out, altura, largura, npr, img);
-	filtro_mediana(id_seq, out, altura, largura, mask, npr, gray_out);
-	
+	filtro_mediana(id_seq, out_median, altura, largura, mask, npr, gray_out);
+	filtro_laplaciano(id_seq, out, altura, largura, mask, npr, out_median);
 	if(id_seq != 0){
 		shmdt(out);
 		shmdt(gray_out);
@@ -222,6 +312,8 @@ int main(int argc, char **argv){
 		
 		shmdt(gray_out);
 		shmctl(shmid_gray, IPC_RMID, 0);
+		shmdt(out_median);
+		shmctl(shmid_median, IPC_RMID, 0);
 		shmdt(out);
 		shmctl(shmid_out, IPC_RMID, 0);
 	} 
