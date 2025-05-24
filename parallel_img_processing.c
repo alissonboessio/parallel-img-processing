@@ -255,11 +255,28 @@ void escreve_imagem_bmp(const char *arquivo, PIXEL *img, int largura, int altura
     fclose(f);
 }
 
+int proxima_fase(int npr) {
+    for (int i = 1; i < npr; i++) {
+        wait(NULL);
+    }
+
+    int pid, id_seq = 0;
+    for (int i = 1; i < npr; i++) {
+        pid = fork();
+        if (pid == 0) {
+            id_seq = i;
+            break;
+        }
+    }
+
+    return id_seq;
+}
+
 /*------------------------------------------------------------------*/
 int main(int argc, char **argv){
 
 	char entrada[50], saida[50];
-	int largura, altura, max_valor, mask, i, np, shmid_out, shmid_median, shmid_gray, pid, id_seq, npr;
+	int largura, altura, max_valor, mask, i, np, shmid_out, shmid_intermediario, pid, id_seq, npr;
 	key_t chave = 17;
 
 	if ( argc != 5 ){
@@ -278,16 +295,13 @@ int main(int argc, char **argv){
 	}		
 	
 	PIXEL *img = le_imagem_bmp(entrada, &largura, &altura, &max_valor);
-
-	shmid_gray = shmget(chave, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
-	PIXEL *gray_out = (PIXEL *)shmat(shmid_gray, 0, 0);
 	
-	shmid_median = shmget(chave + 1, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
-	PIXEL *out_median = (PIXEL *)shmat(shmid_median, 0, 0);
+	shmid_intermediario = shmget(chave, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
+	PIXEL *out_intermediario = (PIXEL *)shmat(shmid_intermediario, 0, 0);
 	
-	shmid_out = shmget(chave + 2, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
+	shmid_out = shmget(chave + 1, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
 	PIXEL *out = (PIXEL *)shmat(shmid_out, 0, 0);
-		
+	
 	id_seq = 0;
 	for(i=1; i<npr; i++){
 		pid = fork();
@@ -297,28 +311,32 @@ int main(int argc, char **argv){
 		}
 	}
 	
-	escala_cinza(id_seq, gray_out, altura, largura, npr, img);
-	filtro_mediana(id_seq, out_median, altura, largura, mask, npr, gray_out);
-	filtro_laplaciano(id_seq, out, altura, largura, mask, npr, out_median);
-	if(id_seq != 0){
-		shmdt(out);
-		shmdt(gray_out);
-	} else {
+	escala_cinza(id_seq, out, altura, largura, npr, img);
+	
+	if (id_seq != 0) exit(0);
+	id_seq = proxima_fase(npr);    
+	
+	filtro_mediana(id_seq, out_intermediario, altura, largura, mask, npr, out);
+	
+	if (id_seq != 0) exit(0);
+	id_seq = proxima_fase(npr);  
+	
+	filtro_laplaciano(id_seq, out, altura, largura, mask, npr, out_intermediario);
+	
+	if(id_seq == 0){
 		for(i=1; i<npr; i++){
 			wait(NULL);
 		}
 		
 		escreve_imagem_bmp(saida, out, largura, altura);
-		
-		shmdt(gray_out);
-		shmctl(shmid_gray, IPC_RMID, 0);
-		shmdt(out_median);
-		shmctl(shmid_median, IPC_RMID, 0);
+		shmdt(out_intermediario);
+		shmctl(shmid_intermediario, IPC_RMID, 0);
 		shmdt(out);
 		shmctl(shmid_out, IPC_RMID, 0);
+		
+		free(img);
 	} 
 	
-	free(img);
 }
 /*--------------------------------------------------------------*/
 
