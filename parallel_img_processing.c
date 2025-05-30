@@ -130,7 +130,7 @@ void * filtro_mediana(int linha, PIXEL* out, int altura, int largura, int mask, 
 
 	free(mediaR);
 	free(mediaG);
-	free(mediaB);
+	free(mediaB);	
 }
 
 /*------------------------------------------------------*/
@@ -255,24 +255,25 @@ void escreve_imagem_bmp(const char *arquivo, PIXEL *img, int largura, int altura
     fclose(f);
 }
 
-int proxima_fase(int npr) {
-    for (int i = 1; i < npr; i++) {
-        wait(NULL);
-    }
 
-    int pid, id_seq = 0;
-    for (int i = 1; i < npr; i++) {
-        pid = fork();
-        if (pid == 0) {
-            id_seq = i;
-            break;
+/*------------------------------------------------------------------*/
+
+void esperar_todos(int *flags, int npr) {
+    int done = 0;
+    while (!done) {
+        done = 1;
+        for (int i = 0; i < npr; i++) {
+            if (flags[i] == 0) {
+                done = 0;
+                break;
+            }
         }
+        usleep(1000); // Espera 1ms para evitar busy-waiting agressivo
     }
-
-    return id_seq;
 }
 
 /*------------------------------------------------------------------*/
+
 int main(int argc, char **argv){
 
 	char entrada[50], saida[50];
@@ -296,11 +297,23 @@ int main(int argc, char **argv){
 	
 	PIXEL *img = le_imagem_bmp(entrada, &largura, &altura, &max_valor);
 	
-	shmid_intermediario = shmget(chave, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
+	shmid_intermediario = shmget(chave++, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
 	PIXEL *out_intermediario = (PIXEL *)shmat(shmid_intermediario, 0, 0);
 	
-	shmid_out = shmget(chave + 1, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
+	shmid_out = shmget(chave++, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
 	PIXEL *out = (PIXEL *)shmat(shmid_out, 0, 0);
+	
+	int shmid_sync_flags = shmget(chave++, sizeof(int) * npr, 0600 | IPC_CREAT);
+	int *sync_flags = (int *)shmat(shmid_sync_flags, NULL, 0);
+	memset(sync_flags, 0, sizeof(int) * npr);
+
+	int shmid_ready_flag_cinza = shmget(chave++, sizeof(int), 0600 | IPC_CREAT);
+	int *ready_flag_cinza = (int *)shmat(shmid_ready_flag_cinza, NULL, 0);
+	*ready_flag_cinza = 0;
+	
+	int shmid_ready_flag_mediana = shmget(chave++, sizeof(int), 0600 | IPC_CREAT);
+	int *ready_flag_mediana = (int *)shmat(shmid_ready_flag_mediana, NULL, 0);
+	*ready_flag_mediana = 0;
 	
 	id_seq = 0;
 	for(i=1; i<npr; i++){
@@ -312,14 +325,34 @@ int main(int argc, char **argv){
 	}
 	
 	escala_cinza(id_seq, out, altura, largura, npr, img);
+	sync_flags[id_seq] = 1;
 	
-	if (id_seq != 0) exit(0);
-	id_seq = proxima_fase(npr);    
-	
+	if (id_seq != 0) {
+		while (*ready_flag_cinza == 0) {
+			usleep(1000);
+		}
+	} else {
+		esperar_todos(sync_flags, npr);
+		// Reset para próxima sincronização
+		memset(sync_flags, 0, sizeof(int) * npr); 
+		
+		*ready_flag_cinza = 1;
+	}	
+		
 	filtro_mediana(id_seq, out_intermediario, altura, largura, mask, npr, out);
+	sync_flags[id_seq] = 1;
 	
-	if (id_seq != 0) exit(0);
-	id_seq = proxima_fase(npr);  
+	if (id_seq != 0) {
+		while (*ready_flag_mediana == 0) {
+			usleep(1000);
+		}
+	} else {
+		esperar_todos(sync_flags, npr);
+		// Reset para próxima sincronização
+		memset(sync_flags, 0, sizeof(int) * npr); 
+		
+		*ready_flag_mediana = 1;
+	}	 
 	
 	filtro_laplaciano(id_seq, out, altura, largura, mask, npr, out_intermediario);
 	
@@ -333,7 +366,13 @@ int main(int argc, char **argv){
 		shmctl(shmid_intermediario, IPC_RMID, 0);
 		shmdt(out);
 		shmctl(shmid_out, IPC_RMID, 0);
-		
+		shmdt(sync_flags);
+		shmctl(shmid_sync_flags, IPC_RMID, 0);
+		shmdt(ready_flag_cinza);
+		shmctl(shmid_ready_flag_cinza, IPC_RMID, 0);
+		shmdt(ready_flag_mediana);
+		shmctl(shmid_ready_flag_mediana, IPC_RMID, 0);
+
 		free(img);
 	} 
 	
