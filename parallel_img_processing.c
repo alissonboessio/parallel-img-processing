@@ -333,7 +333,7 @@ int main(int argc, char **argv){
 		}
 	} else {
 		esperar_todos(sync_flags, npr);
-		// Reset para próxima sincronização
+		// Reset para proxima sync
 		memset(sync_flags, 0, sizeof(int) * npr); 
 		
 		*ready_flag_cinza = 1;
@@ -348,7 +348,7 @@ int main(int argc, char **argv){
 		}
 	} else {
 		esperar_todos(sync_flags, npr);
-		// Reset para próxima sincronização
+		// Reset para proxima sync
 		memset(sync_flags, 0, sizeof(int) * npr); 
 		
 		*ready_flag_mediana = 1;
