@@ -33,38 +33,72 @@ static int mask_laplacian7[49] = {
 };
 
 /*------------------------------------------------------------------*/
+#pragma pack(push, 1)
+typedef struct fileheader {
+	unsigned short type;
+	unsigned int size_file;
+	unsigned short reservad1;
+	unsigned short reservad2;
+	unsigned int offset;
+} FILEHEADER;
+
+typedef struct imageheader{
+	unsigned int size_image_header;
+	int width;
+	int height;
+	unsigned short planes;
+	unsigned short bits_per_pixel;
+	unsigned int compression;
+	unsigned int image_size;
+	int wresolution;
+	int hresolution;
+	unsigned int number_colors;
+	unsigned int significant_colors;
+} IMAGEHEADER;
+
 typedef struct {
     unsigned char r;
     unsigned char g;
     unsigned char b;
 }PIXEL;
-
+#pragma pack(pop)
 /*------------------------------------------------------------------*/
 
-PIXEL *le_imagem_bmp(const char *arquivo, int *largura, int *altura, int *max_valor) {
+PIXEL *le_imagem_bmp(const char *arquivo, int *largura, int *altura) {
     FILE *f = fopen(arquivo, "rb");
-    if (f == NULL) {
+    if (!f) {
         printf("Erro ao abrir o arquivo BMP: %s\n", arquivo);
         return NULL;
     }
 
-    char header[54];
-    fread(header, sizeof(char), 54, f);
+    FILEHEADER fileHeader;
+    IMAGEHEADER imageHeader;
 
-    *largura = *(int*)&header[18];
-    *altura = *(int*)&header[22];
-    *max_valor = 255;
+    fread(&fileHeader, sizeof(FILEHEADER), 1, f);
+    fread(&imageHeader, sizeof(IMAGEHEADER), 1, f);
+
+    if (fileHeader.type != 0x4D42) {
+        printf("Arquivo não é BMP válido!\n");
+        fclose(f);
+        return NULL;
+    }
+
+    *largura = imageHeader.width;
+    *altura = imageHeader.height;
 
     int padding = (4 - (*largura * 3) % 4) % 4;
     PIXEL *img = (PIXEL *)malloc((*largura) * (*altura) * sizeof(PIXEL));
 
+    // ir direto para os dados da img
+    fseek(f, fileHeader.offset, SEEK_SET);
+
     for (int i = *altura - 1; i >= 0; i--) {
         for (int j = 0; j < *largura; j++) {
-            char bgr[3];
-            fread(bgr, sizeof(char), 3, f);
-            img[i * (*largura) + j].r = bgr[2];
-            img[i * (*largura) + j].g = bgr[1];
-            img[i * (*largura) + j].b = bgr[0];
+            char rgb[3];
+            fread(rgb, sizeof(char), 3, f);
+            img[i * (*largura) + j].r = rgb[2];
+            img[i * (*largura) + j].g = rgb[1];
+            img[i * (*largura) + j].b = rgb[0];
         }
         fseek(f, padding, SEEK_CUR);
     }
@@ -214,40 +248,41 @@ void escreve_imagem_bmp(const char *arquivo, PIXEL *img, int largura, int altura
     }
 
     int padding = (4 - (largura * 3) % 4) % 4;
-    int size = 54 + (3 * largura + padding) * altura;
+    int image_size = (3 * largura + padding) * altura;
+    int file_size = sizeof(FILEHEADER) + sizeof(IMAGEHEADER) + image_size;
 
-    char header[54] = {
-        'B', 'M',           // Assinatura
-        0, 0, 0, 0,         // Tamanho do arquivo
-        0, 0, 0, 0,         // Reservado
-        54, 0, 0, 0,        // Offset para dados de imagem
-        40, 0, 0, 0,        // Tamanho do cabecalho DIB
-        0, 0, 0, 0,         // Largura
-        0, 0, 0, 0,         // Altura
-        1, 0,               // Planos
-        24, 0,              // Bits por pixel (24 = RGB)
-        0, 0, 0, 0,         // CompressÃ£o (0 = sem)
-        0, 0, 0, 0,         // Tamanho da imagem
-        0, 0, 0, 0,         // Resolucao X
-        0, 0, 0, 0,         // Resolucao Y
-        0, 0, 0, 0,         // Cores na paleta
-        0, 0, 0, 0          // Cores importantes
-    };
+    FILEHEADER fileHeader;
+    fileHeader.type = 0x4D42; // 'BM'
+    fileHeader.size_file = file_size;
+    fileHeader.reservad1 = 0;
+    fileHeader.reservad2 = 0;
+    fileHeader.offset = sizeof(FILEHEADER) + sizeof(IMAGEHEADER); // normalmente 54 bytes
 
-    // Preencher campos dinamicos
-    *(int*)&header[2] = size;
-    *(int*)&header[18] = largura;
-    *(int*)&header[22] = altura;
+    IMAGEHEADER imageHeader;
+    imageHeader.size_image_header = sizeof(IMAGEHEADER); // normalmente 40 bytes
+    imageHeader.width = largura;
+    imageHeader.height = altura;
+    imageHeader.planes = 1;
+    imageHeader.bits_per_pixel = 24;
+    imageHeader.compression = 0;
+    imageHeader.image_size = image_size;
+    imageHeader.wresolution = 0;
+    imageHeader.hresolution = 0;
+    imageHeader.number_colors = 0;
+    imageHeader.significant_colors = 0;
 
-    fwrite(header, sizeof(char), 54, f);
+    // cabecalhods
+    fwrite(&fileHeader, sizeof(FILEHEADER), 1, f);
+    fwrite(&imageHeader, sizeof(IMAGEHEADER), 1, f);
 
     char padding_data[3] = {0, 0, 0};
 
+    // dados da img
     for (int i = altura - 1; i >= 0; i--) {
         for (int j = 0; j < largura; j++) {
             PIXEL px = img[i * largura + j];
-            char bgr[3] = { px.b, px.g, px.r };
-            fwrite(bgr, sizeof(char), 3, f);
+            char rgb[3] = { px.b, px.g, px.r };
+            fwrite(rgb, sizeof(char), 3, f);
         }
         fwrite(padding_data, sizeof(char), padding, f);
     }
@@ -277,7 +312,7 @@ void esperar_todos(int *flags, int npr) {
 int main(int argc, char **argv){
 
 	char entrada[50], saida[50];
-	int largura, altura, max_valor, mask, i, np, shmid_out, shmid_intermediario, pid, id_seq, npr;
+	int largura, altura, mask, i, np, shmid_out, shmid_intermediario, pid, id_seq, npr;
 	key_t chave = 17;
 
 	if ( argc != 5 ){
@@ -295,7 +330,7 @@ int main(int argc, char **argv){
 		exit(0);
 	}		
 	
-	PIXEL *img = le_imagem_bmp(entrada, &largura, &altura, &max_valor);
+	PIXEL *img = le_imagem_bmp(entrada, &largura, &altura);
 	
 	shmid_intermediario = shmget(chave++, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
 	PIXEL *out_intermediario = (PIXEL *)shmat(shmid_intermediario, 0, 0);
