@@ -2,9 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include <sys/shm.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include <pthread.h>
 
 /*------------------------------------------------------------------*/
 
@@ -62,6 +60,24 @@ typedef struct {
     unsigned char b;
 }PIXEL;
 #pragma pack(pop)
+
+/*------------------------------------------------------------------*/
+
+struct params{
+	int id;
+	int altura;
+	int largura;
+	int n;
+	int nthr;
+	int mask;
+	PIXEL *img;
+	PIXEL *out;
+	PIXEL *out_intermediario;
+	pthread_barrier_t *barrier_escala_cinza;
+	pthread_barrier_t *barrier_filtro_mediana;
+};
+typedef struct params PARAMS_THREAD;
+
 /*------------------------------------------------------------------*/
 
 PIXEL *le_imagem_bmp(const char *arquivo, int *largura, int *altura) {
@@ -126,8 +142,8 @@ void ordena_filtro(int *media, int cont){
 
 /*------------------------------------------------------------------*/
 
-void * filtro_mediana(int linha, PIXEL* out, int altura, int largura, int mask, int np, PIXEL *img){
-	
+void * filtro_mediana(int linha, PIXEL* out, int altura, int largura, int mask, int nthr, PIXEL *img){
+
 	int i, j, k, l;	
 	
 	int *mediaR=NULL, *mediaG=NULL, *mediaB=NULL;
@@ -136,7 +152,7 @@ void * filtro_mediana(int linha, PIXEL* out, int altura, int largura, int mask, 
 	mediaG = (int *)malloc(mask*mask*sizeof(int));
 	mediaB = (int *)malloc(mask*mask*sizeof(int));
 	
-	for (i=linha; i<altura; i+=np){
+	for (i=linha; i<altura; i+=nthr){
 		for (j=0; j<largura; j++){
 			
 			int cont =0;
@@ -184,16 +200,15 @@ int* escolherMatrizLaplaciana(int mask){
 
 /*------------------------------------------------------------------*/
 
-void *filtro_laplaciano(int linha, PIXEL* out, int altura, int largura, int mask, int np, PIXEL *img){
-	
-	int i, j, k, l;	
-	
+void *filtro_laplaciano(int linha, PIXEL* out, int altura, int largura, int mask, int nthr, PIXEL *img){
+		
+	int i, j, k, l;
 	int laplaceR, laplaceG, laplaceB;
 	
 	int *laplacian_mask = NULL;
 	laplacian_mask =  escolherMatrizLaplaciana(mask);
 		
-	for (i=linha; i<altura; i+=np){
+	for (i=linha; i<altura; i+=nthr){
 		for (j=0; j<largura; j++){			
 			laplaceR = 0, laplaceG = 0, laplaceB = 0;			
 
@@ -223,10 +238,11 @@ void *filtro_laplaciano(int linha, PIXEL* out, int altura, int largura, int mask
 }
 
 /*------------------------------------------------------*/
-void * escala_cinza(int linha, PIXEL* out, int altura, int largura, int np, PIXEL *img){	
+void * escala_cinza(int linha, PIXEL* out, int altura, int largura, int nthr, PIXEL *img){
+	
 	int i, j, k, l;
 	
-	for (i=linha; i<altura; i+=np){
+	for (i=linha; i<altura; i+=nthr){
 		for (j=0; j<largura; j++){
 			
 			char gray = img[i*largura+j].r * 0.299 + img[i*largura+j].g * 0.587 + img[i*largura+j].b * 0.114;
@@ -293,18 +309,20 @@ void escreve_imagem_bmp(const char *arquivo, PIXEL *img, int largura, int altura
 
 /*------------------------------------------------------------------*/
 
-void esperar_todos(int *flags, int npr) {
-    int done = 0;
-    while (!done) {
-        done = 1;
-        for (int i = 0; i < npr; i++) {
-            if (flags[i] == 0) {
-                done = 0;
-                break;
-            }
-        }
-        usleep(1000); // Espera 1ms para evitar busy-waiting agressivo
-    }
+void *executa_threads(void *arg) {
+    PARAMS_THREAD *p = (PARAMS_THREAD *)arg;
+
+    escala_cinza(p->id, p->out, p->altura, p->largura, p->nthr, p->img);
+    
+    pthread_barrier_wait(p->barrier_escala_cinza);
+    
+    filtro_mediana(p->id, p->out_intermediario, p->altura, p->largura, p->mask, p->nthr, p->out);
+
+    pthread_barrier_wait(p->barrier_filtro_mediana);
+    
+    filtro_laplaciano(p->id, p->out, p->altura, p->largura, p->mask, p->nthr, p->out_intermediario);
+
+    pthread_exit(NULL);
 }
 
 /*------------------------------------------------------------------*/
@@ -312,18 +330,22 @@ void esperar_todos(int *flags, int npr) {
 int main(int argc, char **argv){
 
 	char entrada[50], saida[50];
-	int largura, altura, mask, i, np, shmid_out, shmid_intermediario, pid, id_seq, npr;
-	key_t chave = 17;
+	int largura, altura, mask, i, nthr;
+	pthread_barrier_t barrier_escala_cinza;
+	pthread_barrier_t barrier_filtro_mediana;	
+	
+	pthread_t *tid = NULL;
+	PARAMS_THREAD *par = NULL;
 
 	if ( argc != 5 ){
-		printf("%s <img_entrada> <img_saida> <mascara> <n processos>\n", argv[0]);
+		printf("%s <img_entrada> <img_saida> <mascara> <n threads>\n", argv[0]);
 		exit(0);
 	}	
 
 	strcpy(entrada, argv[1]);
 	strcpy(saida, argv[2]);
 	mask = atoi(argv[3]);
-	npr = atoi(argv[4]);	
+	nthr = atoi(argv[4]);	
 	
 	if ( mask != 3 && mask != 5 && mask != 7 ){
 		printf("mask deve ser 3, 5 ou 7\n");
@@ -332,84 +354,42 @@ int main(int argc, char **argv){
 	
 	PIXEL *img = le_imagem_bmp(entrada, &largura, &altura);
 	
-	shmid_intermediario = shmget(chave++, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
-	PIXEL *out_intermediario = (PIXEL *)shmat(shmid_intermediario, 0, 0);
-	
-	shmid_out = shmget(chave++, largura *altura * sizeof(PIXEL), 0600 | IPC_CREAT);
-	PIXEL *out = (PIXEL *)shmat(shmid_out, 0, 0);
-	
-	int shmid_sync_flags = shmget(chave++, sizeof(int) * npr, 0600 | IPC_CREAT);
-	int *sync_flags = (int *)shmat(shmid_sync_flags, NULL, 0);
-	memset(sync_flags, 0, sizeof(int) * npr);
+	PIXEL *out_intermediario = (PIXEL *)malloc( largura *altura * sizeof(PIXEL));	
+	PIXEL *out = (PIXEL *)malloc( largura *altura * sizeof(PIXEL));
 
-	int shmid_ready_flag_cinza = shmget(chave++, sizeof(int), 0600 | IPC_CREAT);
-	int *ready_flag_cinza = (int *)shmat(shmid_ready_flag_cinza, NULL, 0);
-	*ready_flag_cinza = 0;
+	tid = (pthread_t *)malloc(nthr * sizeof(pthread_t));
+	par = (PARAMS_THREAD *)malloc(nthr * sizeof(PARAMS_THREAD));
 	
-	int shmid_ready_flag_mediana = shmget(chave++, sizeof(int), 0600 | IPC_CREAT);
-	int *ready_flag_mediana = (int *)shmat(shmid_ready_flag_mediana, NULL, 0);
-	*ready_flag_mediana = 0;
+	pthread_barrier_init(&barrier_escala_cinza, NULL, nthr);
+	pthread_barrier_init(&barrier_filtro_mediana, NULL, nthr);
+		
+	for (i = 0; i < nthr; i++) {
+	    par[i].id = i;
+	    par[i].altura = altura;
+	    par[i].largura = largura;
+	    par[i].nthr = nthr;
+	    par[i].img = img;
+	    par[i].out = out;
+	    par[i].out_intermediario = out_intermediario;
+	    par[i].mask = mask;
+	    par[i].barrier_escala_cinza = &barrier_escala_cinza;
+	    par[i].barrier_filtro_mediana = &barrier_filtro_mediana;
 	
-	id_seq = 0;
-	for(i=1; i<npr; i++){
-		pid = fork();
-		if (pid == 0) { // filhos
-			id_seq = i;
-			break;
-		}
+	    pthread_create(&tid[i], NULL, executa_threads, (void *)&par[i]);
+	}
+				
+	for (i=0; i<nthr; i++ ){
+		pthread_join(tid[i], NULL);
 	}
 	
-	escala_cinza(id_seq, out, altura, largura, npr, img);
-	sync_flags[id_seq] = 1;
+	escreve_imagem_bmp(saida, out, largura, altura);
 	
-	if (id_seq != 0) {
-		while (*ready_flag_cinza == 0) {
-			usleep(1000);
-		}
-	} else {
-		esperar_todos(sync_flags, npr);
-		// Reset para proxima sync
-		memset(sync_flags, 0, sizeof(int) * npr); 
-		
-		*ready_flag_cinza = 1;
-	}	
-		
-	filtro_mediana(id_seq, out_intermediario, altura, largura, mask, npr, out);
-	sync_flags[id_seq] = 1;
+	pthread_barrier_destroy(&barrier_escala_cinza);
+	pthread_barrier_destroy(&barrier_filtro_mediana);
 	
-	if (id_seq != 0) {
-		while (*ready_flag_mediana == 0) {
-			usleep(1000);
-		}
-	} else {
-		esperar_todos(sync_flags, npr);
-		// Reset para proxima sync
-		memset(sync_flags, 0, sizeof(int) * npr); 
-		
-		*ready_flag_mediana = 1;
-	}	 
-	
-	filtro_laplaciano(id_seq, out, altura, largura, mask, npr, out_intermediario);
-	
-	if(id_seq == 0){
-		for(i=1; i<npr; i++){
-			wait(NULL);
-		}
-		
-		escreve_imagem_bmp(saida, out, largura, altura);
-		shmdt(out_intermediario);
-		shmctl(shmid_intermediario, IPC_RMID, 0);
-		shmdt(out);
-		shmctl(shmid_out, IPC_RMID, 0);
-		shmdt(sync_flags);
-		shmctl(shmid_sync_flags, IPC_RMID, 0);
-		shmdt(ready_flag_cinza);
-		shmctl(shmid_ready_flag_cinza, IPC_RMID, 0);
-		shmdt(ready_flag_mediana);
-		shmctl(shmid_ready_flag_mediana, IPC_RMID, 0);
-
-		free(img);
-	} 
+	free(out);
+	free(out_intermediario);
+	free(img);
 	
 }
 /*--------------------------------------------------------------*/
